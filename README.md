@@ -4,12 +4,16 @@
 ## ビルド方法
 本コード単体ではビルドできません．外部ライブラリとして，[Eigen](http://eigen.tuxfamily.org/ "Eigen")および[QuadProg++](http://quadprog.sourceforge.net/ "QuadProg++")が必要です．
 
-ビルドのための事前準備は，大まかには次の2点です．
+ビルドのための最も簡単な手順は次の通りです．
 
 1. Eigenのインストールフォルダにインクルードパスを通す．
-2. QuadProg++をダウンロードし，「QuadProg++.cc」と「QuadProg++.hh」をssdrフォルダにコピーする．
+2. QuadProg++をダウンロードし，下記の4つのファイルをssdrフォルダにコピーする．
+ * QuadProg++.hh
+ * QuadProg++.cc
+ * Array.hh
+ * Array.cc
 
-なお，ビルドおよび実行テストは Eigen 3.2.4 と QuadProg++ 1.2.1 を用いて行っています．
+なお，ビルドおよび実行テストには Eigen 3.2.4 と QuadProg++ 1.2.1 を用いています．
 
 ## 計算パラメータの調整
 SSDRの主な計算パラメータは，HorseObject::OnInit内，HorseObject.cpp の339行目あたり，ssdrParam 構造体に指定されています．
