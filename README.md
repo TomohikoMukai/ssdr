@@ -1,16 +1,16 @@
 # Computer Graphics Gems JP 2015:5．「スキニング分解」 サンプルコード
-本コードは，Computer Graphics Gems JP 2015の5章「スキニング分解」で紹介しているアルゴリズム"Smooth Skinning Decomposition with Rigid Bones"の実装サンプルです．
+本コードは，[Computer Graphics Gems JP 2015](http://www.borndigital.co.jp/book/5498.html,"Computer Graphics Gems JP 2015")の7章「スキニング分解」で紹介しているアルゴリズム"Smooth Skinning Decomposition with Rigid Bones"の実装サンプルです．
 
 ## ビルドと実行方法
-本サンプルは Visual Studio 2013 Professional プロジェクトとして作成しています．また，本コード単体ではビルドできません．ライブラリとして，[Eigen](http://eigen.tuxfamily.org/ "Eigen")および[QuadProg++](http://quadprog.sourceforge.net/ "QuadProg++")が必要です．なお，ビルドおよび実行テストには Eigen 3.2.4 および QuadProg++ 1.2.1 を用いました．
+本サンプルは Visual Studio 2013 Professional プロジェクトとして作成しています．また，本プロジェクトのビルドには，ライブラリとして [Eigen](http://eigen.tuxfamily.org/ "Eigen") および [QuadProg++](http://quadprog.sourceforge.net/ "QuadProg++") が必要です．なお，ビルドおよび実行テストには Eigen 3.2.4 および QuadProg++ 1.2.1 を用いました．
 
-また，メッシュアニメーションのサンプルデータを [Mesh Data from Deformation Transfer for Triangle Meshes](http://people.csail.mit.edu/sumner/research/deftransfer/data.html "Mesh Data from 
+また，メッシュアニメーションのデータを [Mesh Data from Deformation Transfer for Triangle Meshes](http://people.csail.mit.edu/sumner/research/deftransfer/data.html "Mesh Data from 
 Deformation Transfer for Triangle Meshes")からダウンロードし，所定のフォルダに配置する必要もあります．
 
 ビルドと実行のための最も簡単な手順は次の通りです．
 
 1. Eigenのインストールフォルダにインクルードパスを通す．
-2. QuadProg++をダウンロードし，下記の4つのファイルをssdrフォルダにコピーする．
+2. QuadProg++をダウンロードし，下記4つのファイルをssdrフォルダにコピーする．
  * QuadProg++.hh
  * QuadProg++.cc
  * Array.hh
