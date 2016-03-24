@@ -4,6 +4,10 @@
 #include <Eigen/Core>
 #include <Eigen/Eigen>
 #include "QuadProg.h"
+#ifdef ENABLE_TBB
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#endif //ENABLE_TBB
 
 using namespace DirectX;
 using namespace Eigen;
@@ -40,7 +44,159 @@ double ComputeApproximationErrorSq(const Output& output, const Input& input, con
     }
     return rsqsum;
 }
+#ifdef ENABLE_TBB
+class WeightMapUpdator
+{
+private:
+    Output* output;
+    const Input* input;
+    const Parameter* param;
+    const MatrixXd* cem;
+    const MatrixXd* cim;
+    const VectorXd* cev;
+    const VectorXd* civ;
+    const MatrixXd* scem;
+    const MatrixXd* scim;
+    const VectorXd* sciv;
+public:
+    WeightMapUpdator(Output* output_, const Input* input_, const Parameter* param_,
+        const MatrixXd* cem_, const MatrixXd* cim_, const VectorXd* cev_, const VectorXd* civ_,
+        const MatrixXd* scem_, const MatrixXd* scim_, const VectorXd* sciv_)
+        : output(output_), input(input_), param(param_),
+        cem(cem_), cim(cim_), cev(cev_), civ(civ_),
+        scem(scem_), scim(scim_), sciv(sciv_)
+    {
+    }
+    void operator ()(const tbb::blocked_range<int>& range) const
+    {
+        const int numVertices = input->numVertices;
+        const int numExamples = input->numExamples;
+        const int numIndices = param->numIndices;
+        const int numBones = output->numBones;
 
+        MatrixXd gm = MatrixXd::Zero(numBones, numBones), sgm = MatrixXd::Zero(numIndices, numIndices);
+        VectorXd gv = VectorXd::Zero(numBones), sgv = VectorXd::Zero(numIndices);
+
+        VectorXd weight = VectorXd::Zero(numBones), w0, sweight = VectorXd::Zero(numIndices);
+        MatrixXd basis = MatrixXd::Zero(numBones, numExamples * 3), sbasis = MatrixXd::Zero(numIndices, numExamples * 3);
+        VectorXd targetVertex = VectorXd::Zero(numExamples * 3);
+
+        for (int v = range.begin(); v != range.end(); ++v)
+        {
+            const XMVECTOR restVertex = XMLoadFloat3A(&input->bindModel[v]);
+            for (int s = 0; s < numExamples; ++s)
+            {
+                for (int b = 0; b < numBones; ++b)
+                {
+                    const RigidTransform& rt = output->boneTrans[s * numBones + b];
+                    XMVECTOR tv = rt.TransformCoord(restVertex);
+                    basis(b, s * 3 + 0) = XMVectorGetX(tv);
+                    basis(b, s * 3 + 1) = XMVectorGetY(tv);
+                    basis(b, s * 3 + 2) = XMVectorGetZ(tv);
+                }
+            }
+            for (int s = 0; s < numExamples; ++s)
+            {
+                targetVertex[s * 3 + 0] = input->sample[s * numVertices + v].x;
+                targetVertex[s * 3 + 1] = input->sample[s * numVertices + v].y;
+                targetVertex[s * 3 + 2] = input->sample[s * numVertices + v].z;
+            }
+            // G = A * A^T
+            gm = basis * basis.transpose();
+            // g = A^T * b
+            gv = -basis * targetVertex;
+
+            double qperr = SolveQP(gm, gv, *cem, *cev, *cim, *civ, weight);
+            assert(qperr != std::numeric_limits<double>::infinity());
+
+            float weightSum = 0;
+            for (int i = 0; i < numIndices; ++i)
+            {
+                double maxw = -std::numeric_limits<double>::max();
+                int bestbone = -1;
+                for (int b = 0; b < numBones; ++b)
+                {
+                    if (weight[b] > maxw)
+                    {
+                        maxw = weight[b];
+                        bestbone = b;
+                    }
+                }
+                if (maxw <= 0)
+                {
+                    break;
+                }
+
+                output->index[v * numIndices + i] = bestbone;
+                output->weight[v * numIndices + i] = static_cast<float>(maxw);
+                weightSum += static_cast<float>(maxw);
+                weight[bestbone] = 0;
+            }
+
+            if (weightSum < 1.0f)
+            {
+                for (int j = 0; j < numExamples * 3; ++j)
+                {
+                    for (int i = 0; i < numIndices; ++i)
+                    {
+                        sbasis(i, j) = basis(output->index[v * numIndices + i], j);
+                    }
+                }
+                sgm = sbasis * sbasis.transpose();
+                sgv = -sbasis * targetVertex;
+                qperr = SolveQP(sgm, sgv, *scem, *cev, *scim, *sciv, sweight);
+                if (qperr != std::numeric_limits<double>::infinity())
+                {
+                    for (int i = 0; i < numIndices; ++i)
+                    {
+                        output->weight[v * numIndices + i] = static_cast<float>(sweight[i]);
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < numIndices; ++i)
+                    {
+                        output->weight[v * numIndices + i] /= weightSum;
+                    }
+                }
+            }
+        }
+    }
+};
+void UpdateWeightMap(Output& output, const Input& input, const Parameter& param)
+{
+    const int numBones = output.numBones;
+    const int numIndices = param.numIndices;
+
+    // partition of unity制約 : cem^T xv + cev = 0
+    MatrixXd cem = MatrixXd::Zero(1, numBones);
+    MatrixXd scem = MatrixXd::Zero(1, numIndices);
+    VectorXd cev = VectorXd::Zero(1);
+    // 非負制約 : cim^T xv + civ >= 0
+    MatrixXd cim = MatrixXd::Zero(numBones, numBones);
+    MatrixXd scim = MatrixXd::Zero(numIndices, numIndices);
+    VectorXd civ = VectorXd::Zero(numBones);
+    VectorXd sciv = VectorXd::Zero(numIndices);
+    for (int b = 0; b < numBones; ++b)
+    {
+        cem(0, b) = -1.0;
+        cim(b, b) = 1.0;
+        civ(b) = 0;
+    }
+    for (int i = 0; i < numIndices; ++i)
+    {
+        scem(0, i) = -1.0;
+        scim(i, i) = 1.0;
+        sciv(i) = 0;
+    }
+    cev(0) = 1.0;
+
+    tbb::parallel_for(tbb::blocked_range<int>(0, input.numVertices),
+        WeightMapUpdator(&output, &input, &param,
+        &cem, &cim, &cev, &civ, &scem,
+        &scim, &sciv));
+}
+#else
 void UpdateWeightMap(Output& output, const Input& input, const Parameter& param)
 {
     const int numVertices = input.numVertices;
@@ -166,6 +322,7 @@ void UpdateWeightMap(Output& output, const Input& input, const Parameter& param)
         }
     }
 }
+#endif
 
 // リストxxx.13：Hornの点群位置合わせアルゴリズム
 RigidTransform CalcPointsAlignment(size_t numPoints, std::vector<XMFLOAT3A>::const_iterator ps, std::vector<XMFLOAT3A>::const_iterator pd)
@@ -183,6 +340,13 @@ RigidTransform CalcPointsAlignment(size_t numPoints, std::vector<XMFLOAT3A>::con
     }
     cs /= numPoints;
     cd /= numPoints;
+
+    // 回転の推定ができない or 回転を推定しない場合は平行移動成分のみ戻す
+    if (numPoints < 3)
+    {
+        XMStoreFloat3A(&transform.Translation(), cd - cs);
+        return transform;
+    }
 
     // モーメント行列の計算
     Matrix<double, 4, 4> moment;
@@ -293,6 +457,74 @@ void SubtractCentroid(std::vector<XMFLOAT3A>& model, std::vector<XMFLOAT3A>& exa
     }
 }
 
+#ifdef ENABLE_TBB
+class BoneTransformUpdator
+{
+private:
+    Output* output;
+    const Input* input;
+    const Parameter* param;
+    const VectorXd* weight;
+    int bone;
+public:
+    BoneTransformUpdator(Output* output_, const Input* input_, const Parameter* param_, const VectorXd* weight_)
+        : bone(0), output(output_), input(input_), param(param_), weight(weight_)
+    {
+    }
+    void ChangeBone(int b)
+    {
+        bone = b;
+    }
+    void operator () (const tbb::blocked_range<int>& range) const
+    {
+        std::vector<XMFLOAT3A> model(input->numVertices), example(input->numVertices);
+        for (int s = range.begin(); s != range.end(); ++s)
+        {
+            // 式xxx.9：\tilde{q}_{j,n}
+            ComputeExamplePoints(example, s, bone, *output, *input, *param);
+
+            // 式xxx.10，xxx.11
+            XMFLOAT3A corModel(0, 0, 0), corExample(0, 0, 0);
+            SubtractCentroid(model, example, corModel, corExample, *weight, *output, *input);
+
+            // 式xxx.12の解
+            RigidTransform transform = CalcPointsAlignment(model.size(), model.begin(), example.begin());
+            // 式xxx.13
+            XMVECTOR d = XMLoadFloat3A(&corExample) - transform.TransformCoord(XMLoadFloat3A(&corModel));
+            XMStoreFloat3A(&transform.Translation(), d + XMLoadFloat3A(&transform.Translation()));
+            output->boneTrans[s * output->numBones + bone] = transform;
+        }
+    }
+};
+void UpdateBoneTransform(Output& output, const Input& input, const Parameter& param)
+{
+    const int numVertices = input.numVertices;
+    const int numExamples = input.numExamples;
+    const int numIndices = param.numIndices;
+    const int numBones = output.numBones;
+
+    VectorXd boneWeight = VectorXd::Zero(numVertices);
+    BoneTransformUpdator transformUpdator(&output, &input, &param, &boneWeight);
+    tbb::blocked_range<int> blockedRange(0, numExamples);
+    for (int bone = 0; bone < numBones; ++bone)
+    {
+        for (int v = 0; v < numVertices; ++v)
+        {
+            boneWeight[v] = 0;
+            for (int i = 0; i < numIndices; ++i)
+            {
+                if (output.index[v * numIndices + i] == bone)
+                {
+                    boneWeight[v] = output.weight[v * numIndices + i];
+                    break;
+                }
+            }
+        }
+        transformUpdator.ChangeBone(bone);
+        tbb::parallel_for(blockedRange, transformUpdator);
+    }
+}
+#else
 void UpdateBoneTransform(Output& output, const Input& input, const Parameter& param)
 {
     const int numVertices = input.numVertices;
@@ -333,7 +565,7 @@ void UpdateBoneTransform(Output& output, const Input& input, const Parameter& pa
         }
     }
 }
-
+#endif
 void UpdateBoneTransform(std::vector<RigidTransform>& boneTrans, int numBones, const Output& output, const Input& input, const Parameter& param)
 {
     const int numVertices = input.numVertices;
@@ -518,27 +750,17 @@ double Decompose(Output& output, const Input& input, const Parameter& param)
     output.index.assign(numVertices * numIndices, 0);
     output.weight.assign(numVertices * numIndices, 0.0f);
 
-    FILE* fout = stderr;
-    //fopen_s(&fout, "convergence.csv", "w");
-
     // クラスタ分割期待値最大化法を用いた初期バインディング
     output.numBones = ClusterInitialBones(output, input, param);
     // 初期ボーントランスフォーム
     output.boneTrans.assign(numExamples * output.numBones, RigidTransform::Identity());
     UpdateBoneTransform(output.boneTrans, output.numBones, output, input, param);
-    fprintf(fout, "Initial  , %f\n", ComputeApproximationErrorSq(output, input, param));
 
     // BCDアルゴリズムによるスキニングウェイトとボーン姿勢の交互最適化
     for (int loop = 0; loop < param.numMaxIterations; ++loop)
     {
         UpdateWeightMap(output, input, param);
-        fprintf(fout, "WeightMap, %f\n", ComputeApproximationErrorSq(output, input, param));
         UpdateBoneTransform(output, input, param);
-        fprintf(fout, "Transform, %f\n", ComputeApproximationErrorSq(output, input, param));
-    }
-    if (fout != stderr)
-    {
-        fclose(fout);
     }
     return ComputeApproximationErrorSq(output, input, param);
 }
